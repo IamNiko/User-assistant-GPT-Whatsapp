@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+twilio
+openai
+python-decouple
+sqlalchemy
+python-multipart
+pyngrok
+decouple
+
