@@ -1,173 +1,189 @@
 from fastapi import FastAPI, Form
 from twilio.rest import Client
 from decouple import config
+from openai import OpenAI
+import re
+from typing import Dict, Any
 
 app = FastAPI()
+client = OpenAI(api_key=config('OPENAI_API_KEY'))
+twilio_client = Client(config('TWILIO_ACCOUNT_SID'), config('TWILIO_AUTH_TOKEN'))
 
-# Configuración de Twilio
-account_sid = config('TWILIO_ACCOUNT_SID')
-auth_token = config('TWILIO_AUTH_TOKEN')
-twilio_client = Client(account_sid, auth_token)
-
-# Almacén de estados de usuario
 user_states = {}
+
+SYSTEM_PROMPT = """Eres un asistente amable para máquinas expendedoras P-KAP. Estás ayudando a un usuario con problemas. Continuar siempre con el hilo de la conversación, no volver a empezar a menos que haya pasado 10 minitos
+
+Contexto actual:
+- Nombre: {name}
+- Rol: {role}
+- Estado: {step}
+- Pagó: {has_paid}
+
+DIRECTRICES:
+1. Producto caído/atascado:
+   - Si pagó: Tranquilizar sobre reembolso
+   - Consultar si ve algun producto caido, atascado o encajado
+   - En caso de que vea algo mal, atascado o producto caido: informar al staff para que lo solucione
+   - Cuando no haya solucion, no encuentre personal: tranquilizarlo y Dar número XXXXXXX
+
+2. Pagó sin producto:
+   - Explicar devolución automática (7 días), dependiendo del banco en un maximo de 7 dias se devuelve
+   - Consultar si ve algun producto caido, atascado o encajado
+   - Recomendar ayuda del staff en caso de que vea algo mal
+   - Si no puede ver nada, porque la puerta no es transparente por ejemplo, que intente contactar al staff
+
+3. Usuario frustrado:
+   - Empatizar, pero no ser emocionado ni exagerado
+   - Dar consejos claros y no ofender
+   - Dar soluciones claras
+   - Mantener calma
+
+4. Sin staff disponible:
+   - Con pago: Asegurar reembolso y dar número
+   - Sin pago: Sugerir volver después, y si quiere intentarlo nuevamente la compra que lo haga siempre que no vea nada raro
+
+Mantén respuestas breves pero completas."""
+
+def is_valid_name(message: str) -> bool:
+    invalid_words = {
+        'ok', 'vale', 'bien', 'bueno', 'si', 'no', 'hola', 
+        'para', 'por', 'que', 'cual', 'como', 'cuando',
+        'porque', 'nose', 'nose', 'nop', 'yes', 'yeah',
+        'claro', 'dale', 'obvio', 'test', 'prueba'
+    }
+    
+    text = message.lower().strip()
+    words = text.split()
+    
+    # Validaciones
+    if (len(words) == 0 or                           # Vacío
+        any(word in invalid_words for word in words) or  # Palabras inválidas
+        len(text) > 20 or                            # Muy largo
+        re.search(r'[0-9@#$%^&*(),.?":{}|<>]', text) or  # Símbolos/números
+        any(x in text for x in ['porque', 'para que', 'por que', '?', '!', 'jaja', 'test']) or  # Preguntas/risas
+        len(re.sub(r'[^a-zA-ZáéíóúñÁÉÍÓÚÑ\s]', '', text)) < 2):  # Muy corto sin símbolos
+        return False
+    return True
+
+def clean_name(name: str) -> str:
+    prefixes = [
+        r'^(?:me\s+llamo\s+)',
+        r'^(?:soy\s+)',
+        r'^(?:mi\s+nombre\s+es\s+)',
+        r'^(?:ok\s+)',
+        r'^(?:vale\s+)',
+        r'^(?:hola\s+)',
+        r'^(?:yo\s+)',
+        r'^(?:pues\s+)',
+    ]
+    
+    name = name.lower().strip()
+    for prefix in prefixes:
+        name = re.sub(prefix, '', name)
+    
+    # Capitalizar cada palabra
+    return ' '.join(word.capitalize() for word in name.split())
+
+def detect_role(message: str) -> str:
+    jugador = [r'j', r'jug', r'jugador', r'player', r'juego', r'tenista', r'1']
+    staff = [r's', r'sta', r'staff', r'empleado', r'personal', r'trabajo', r'2']
+    
+    msg = message.lower()
+    if any(re.search(pattern, msg) for pattern in jugador):
+        return "jugador"
+    if any(re.search(pattern, msg) for pattern in staff):
+        return "staff"
+    return None
+
+def get_gpt4_response(message: str, context: Dict[str, Any]) -> str:
+    try:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT.format(**context)},
+            {"role": "user", "content": message}
+        ]
+        
+        if context.get("conversation_history"):
+            for msg in context["conversation_history"][-3:]:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=messages
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"GPT-4 Error: {e}")
+        return f"Lo siento {context.get('name', '')}, ¿podrías reformular tu pregunta?"
 
 @app.post("/webhook")
 async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
     try:
-        incoming_msg = Body.strip().lower()
+        incoming_msg = Body.strip()
         sender = From.strip()
-        user_state = user_states.get(sender, {"step": "ask_name", "name": None, "role": None, "problem": None})
+        user_state = user_states.get(sender, {
+            "step": "inicio",
+            "name": None,
+            "role": None,
+            "has_paid": False,
+            "conversation_history": []
+        })
 
-        # Detectar enfado o malestar
-        def detect_anger(message):
-            anger_keywords = ["mierda", "puta", "qué asco", "maldita", "qué porquería", "no funciona", "horrible", "nadaaaa"]
-            return any(word in message for word in anger_keywords)
+        if user_state["step"] == "inicio":
+            bot_response = "¡Hola! Soy el asistente de P-KAP. ¿Podrías decirme tu nombre?"
+            user_state["step"] = "nombre"
 
-        # Reconocer problemas descriptivos relacionados con el ascensor
-        def interpret_problem(message):
-            ascensor_keywords = [
-                "arriba", "mitad", "medio", "derecha", "izquierda", "no está abajo", "mal colocado"
-            ]
-            if "ascensor" in message and any(keyword in message for keyword in ascensor_keywords):
-                return "3"  # Ascensor fuera de posición
-            if "atascado" in message:
-                return "1"  # Producto atascado
-            if "caído" in message:
-                return "2"  # Producto caído
-            return None
-
-        # Paso 1: Solicitar el nombre
-        if user_state["step"] == "ask_name":
-            bot_response = "¡Hola! Soy el asistente de P-KAP. ¿Cómo te llamas?"
-            user_state["step"] = "welcome_user"
-
-        # Paso 2: Interpretar el nombre o tranquilizar al usuario si está molesto
-        elif user_state["step"] == "welcome_user":
-            if detect_anger(incoming_msg):
+        elif user_state["step"] == "nombre":
+            if not is_valid_name(incoming_msg):
+                name_question = f"El usuario respondió '{incoming_msg}' cuando le pedí su nombre. Da una respuesta empática y amable explicando por qué necesitas su nombre real."
+                bot_response = get_gpt4_response(name_question, user_state)
+            else:
+                user_state["name"] = clean_name(incoming_msg)
                 bot_response = (
-                    "Entiendo que estás molesto. Lamento que estés teniendo una experiencia frustrante. Estoy aquí para ayudarte. "
-                    "Por favor, ¿puedes decirme tu nombre para que pueda asistirte mejor?"
-                )
-            elif len(incoming_msg.split()) == 1 and incoming_msg.isalpha():
-                user_state["name"] = incoming_msg.capitalize()
-                bot_response = (
-                    f"¡Encantado de conocerte, {user_state['name']}! ¿Eres un jugador o staff del club? Responde con:\n"
+                    f"¡Gracias {user_state['name']}! ¿Eres jugador o personal del club?\n"
                     "1️⃣ Jugador\n"
-                    "2️⃣ Staff del club"
+                    "2️⃣ Staff"
                 )
-                user_state["step"] = "identify_role"
+                user_state["step"] = "rol"
+
+        elif user_state["step"] == "rol":
+            role = detect_role(incoming_msg)
+            if role:
+                user_state["role"] = role
+                if role == "jugador":
+                    bot_response = (
+                        f"¿En qué puedo ayudarte {user_state['name']}?\n"
+                        "1️⃣ Problema con la entrega de un producto\n"
+                        "2️⃣ Problema con el pago\n"
+                        "3️⃣ Problema con la máquina\n"
+                        "4️⃣ Otras consultas"
+                    )
+                else:
+                    bot_response = (
+                        "¿Qué problema estás observando?\n"
+                        "1️⃣ Producto no dispensado\n"
+                        "2️⃣ Problema con datáfono\n"
+                        "3️⃣ Otro"
+                    )
+                user_state["step"] = "problema"
             else:
-                bot_response = (
-                    "No estoy seguro de haber entendido tu nombre. Por favor, repítelo para poder dirigirme correctamente a ti."
-                )
+                bot_response = "Por favor indica si eres jugador (1) o staff (2)"
 
-        # Paso 3: Identificar rol
-        elif user_state["step"] == "identify_role":
-            if "jugador" in incoming_msg or incoming_msg == "1":
-                user_state["role"] = "Jugador"
-                bot_response = (
-                    "Entendido. ¿En qué puedo ayudarte?\n"
-                    "1️⃣ Problemas con pagos\n"
-                    "2️⃣ Producto no entregado\n"
-                    "3️⃣ Preguntas generales"
-                )
-                user_state["step"] = "player_issue"
-            elif "staff" in incoming_msg or incoming_msg == "2":
-                user_state["role"] = "Staff"
-                bot_response = (
-                    "Entendido. ¿En qué puedo ayudarte?\n"
-                    "1️⃣ Problemas de dispensación\n"
-                    "2️⃣ Datáfono\n"
-                    "3️⃣ Conexiones/Energía"
-                )
-                user_state["step"] = "staff_issue"
-            else:
-                bot_response = "Por favor, selecciona una opción válida:\n1️⃣ Jugador\n2️⃣ Staff del club"
+        else:
+            if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago", incoming_msg.lower()):
+                user_state["has_paid"] = True
 
-        # Paso 4: Problema del jugador
-        elif user_state["step"] == "player_issue":
-            if "pagado" in incoming_msg and ("nada" in incoming_msg or "producto" in incoming_msg or "entrega" in incoming_msg):
-                bot_response = (
-                    "Lamento mucho el inconveniente. Para ayudarte mejor, ¿puedes confirmarme si sucede alguna de estas situaciones?\n"
-                    "1️⃣ ¿Hay un producto atascado?\n"
-                    "2️⃣ ¿Hay un producto caído dentro de la máquina?\n"
-                    "3️⃣ ¿El ascensor no está en su posición inicial (abajo a la izquierda)?\n\n"
-                    "Responde con el número correspondiente o describe si observas algo más."
-                )
-                user_state["step"] = "identify_cause"
-            else:
-                bot_response = (
-                    "¿Podrías darme más detalles sobre el problema que estás experimentando? Estoy aquí para ayudarte."
-                )
+            user_state["conversation_history"].append({"role": "user", "content": incoming_msg})
+            bot_response = get_gpt4_response(incoming_msg, user_state)
+            user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
-        # Paso 5: Identificar causas del problema
-        elif user_state["step"] == "identify_cause":
-            problem_code = interpret_problem(incoming_msg)
-
-            if problem_code:
-                problems = {
-                    "1": "producto atascado",
-                    "2": "producto caído",
-                    "3": "ascensor fuera de posición"
-                }
-                user_state["problem"] = problems[problem_code]
-                bot_response = (
-                    f"Entendido, parece que hay un {user_state['problem']}. Por favor, contacta al staff del club para resolver este problema. "
-                    "¿Pudiste comunicarte con alguien del staff?"
-                )
-                user_state["step"] = "contact_staff"
-            elif "no" in incoming_msg:
-                bot_response = (
-                    "Gracias por verificar. Dado que no observas problemas, puedes intentar nuevamente la compra. "
-                    "No te preocupes, la compra anterior no será cobrada."
-                )
-                user_state["step"] = "final_step"
-            else:
-                bot_response = (
-                    "No entiendo tu respuesta. Por favor, indícame si observas alguno de los problemas mencionados o describe lo que ves."
-                )
-
-        # Paso 6: Contactar al staff
-        elif user_state["step"] == "contact_staff":
-            if "no hay nadie" in incoming_msg or "no puedo contactar" in incoming_msg or "no quiero" in incoming_msg:
-                bot_response = (
-                    "Entiendo que no puedes contactar al staff en este momento. No te preocupes, si el producto no fue entregado, "
-                    "no se te cobrará. Si se realizó un cargo, será reembolsado automáticamente dentro de una semana. "
-                    "Si no recibes el reembolso, por favor contacta a soporte al número +123456789."
-                )
-                user_state["step"] = "reassurance"
-            elif "sí" in incoming_msg or "puedo" in incoming_msg:
-                bot_response = (
-                    "Perfecto, por favor informa al staff del club para que puedan resolver el problema. "
-                    "Si necesitas algo más, no dudes en escribirme."
-                )
-                user_state["step"] = "final_step"
-            else:
-                bot_response = "¿Pudiste contactar al staff del club? Por favor, dime si necesitas ayuda adicional."
-
-        # Paso 7: Confirmar Tranquilidad
-        elif user_state["step"] == "reassurance":
-            if "seguro" in incoming_msg or "¿seguro?" in incoming_msg:
-                bot_response = (
-                    "¡Por supuesto! Si el producto no fue entregado, no se te cobrará. Si tienes más dudas, no dudes en preguntarme."
-                )
-            else:
-                bot_response = (
-                    "Gracias por contactarnos. Espero que tu problema se resuelva pronto. "
-                    "Si necesitas más ayuda, no dudes en escribirme. ¡Que tengas un buen día!"
-                )
-                user_state["step"] = "ask_name"
-
-        # Guardar estado del usuario
         user_states[sender] = user_state
-
-        # Enviar respuesta al usuario
         twilio_client.messages.create(
             body=bot_response,
             from_='whatsapp:+14155238886',
             to=sender
         )
-
+        return {"status": "success"}
+        
     except Exception as e:
         print(f"Error: {e}")
+        return {"status": "error", "message": str(e)}
