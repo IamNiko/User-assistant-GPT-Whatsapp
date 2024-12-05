@@ -36,10 +36,10 @@ def split_message(message: str, limit: int = 1500) -> list:
     return parts
 
 try:
-    with open('Promp.txt', 'r', encoding='utf-8') as file:
+    with open('Prompt_Bas.txt', 'r', encoding='utf-8') as file:
         TECHNICAL_PROMPT = file.read()
 except FileNotFoundError:
-    print("Advertencia: No se encontró el archivo Promp.txt")
+    print("Advertencia: No se encontró el archivo Prompt_Bas.txt")
     TECHNICAL_PROMPT = "Error al cargar el prompt técnico"
 
 # Clave de acceso para técnicos (en producción debería estar en .env)
@@ -182,6 +182,8 @@ def get_gpt4_response(message: str, context: Dict[str, Any]) -> str:
 
 @app.post("/webhook")
 async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
+    print(f"Solicitud recibida. Body: {Body}, From: {From}")
+
     try:
         incoming_msg = Body.strip()
         sender = From.strip()
