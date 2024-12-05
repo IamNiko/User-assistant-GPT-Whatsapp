@@ -49,7 +49,9 @@ def is_valid_name(message: str) -> bool:
         'ok', 'vale', 'bien', 'bueno', 'si', 'no', 'hola', 
         'para', 'por', 'que', 'cual', 'como', 'cuando',
         'porque', 'nose', 'nose', 'nop', 'yes', 'yeah',
-        'claro', 'dale', 'obvio', 'test', 'prueba'
+        'claro', 'dale', 'obvio', 'test', 'prueba',
+        'entendido', 'entendi', 'comprendo', 'comprendido',
+        'ya', 'te', 'he', 'dicho', 'dije'
     }
     
     text = message.lower().strip()
@@ -71,6 +73,7 @@ def clean_name(name: str) -> str:
         r'^(?:soy\s+)',
         r'^(?:mi\s+nombre\s+es\s+)',
         r'^(?:ok\s+)',
+        r'^(?:vale\s+vale\s+)',  # Agregamos este patrón
         r'^(?:vale\s+)',
         r'^(?:hola\s+)',
         r'^(?:yo\s+)',
@@ -133,9 +136,25 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             user_state["step"] = "nombre"
 
         elif user_state["step"] == "nombre":
-            if not is_valid_name(incoming_msg):
-                name_question = f"El usuario respondió '{incoming_msg}' cuando le pedí su nombre. Da una respuesta empática y amable explicando por qué necesitas su nombre real."
-                bot_response = get_gpt4_response(name_question, user_state)
+            if user_state.get("name"):  # Si ya tenemos un nombre guardado
+                bot_response = (
+                    f"¡Gracias {user_state['name']}! ¿Eres jugador o personal del club?\n"
+                    "1️⃣ Jugador\n"
+                    "2️⃣ Staff"
+                )
+                user_state["step"] = "rol"
+            elif not is_valid_name(incoming_msg):
+                if "llamo" in incoming_msg.lower() and "nicolas" in incoming_msg.lower():
+                    user_state["name"] = "Nicolas"
+                    bot_response = (
+                        f"¡Gracias Nicolas! ¿Eres jugador o personal del club?\n"
+                        "1️⃣ Jugador\n"
+                        "2️⃣ Staff"
+                    )
+                    user_state["step"] = "rol"
+                else:
+                    name_question = f"El usuario respondió '{incoming_msg}' cuando le pedí su nombre. Da una respuesta empática y amable explicando por qué necesitas su nombre real."
+                    bot_response = get_gpt4_response(name_question, user_state)
             else:
                 user_state["name"] = clean_name(incoming_msg)
                 bot_response = (
