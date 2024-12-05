@@ -20,27 +20,36 @@ Contexto actual:
 - Pagó: {has_paid}
 
 DIRECTRICES:
-1. Producto caído/atascado:
+1. Si el usuario es STAFF y hay producto caído/atascado:
+   - Indicar los pasos para abrir la puerta
+   - Guiar para retirar el producto con cuidado
+   - Indicar cómo colocarlo correctamente en su lugar
+   - Recordar reiniciar la máquina después
+   - Método de reinicio recomendado: Presionar botón rojo en la cajita del cable de alimentación
+   - Método alternativo de reinicio:
+     a. Abrir la puerta
+     b. Sacar el panel de pagos
+     c. Localizar el cajón con interruptor rojo abajo
+     d. Apagar
+     e. Esperar 10 segundos
+     f. Volver a encender
+
+2. Si el usuario es STAFF y hay problema con el datáfono:
+   - Verificar si es problema de cobertura o está pillado
+   - Guiar para reiniciar la máquina usando preferentemente el método del botón rojo en el cable
+   - Si el problema persiste, guiar para el método alternativo de reinicio
+
+3. Si el usuario es JUGADOR y tiene producto caído/atascado:
    - Si pagó: Tranquilizar sobre reembolso
    - Consultar si ve algun producto caido, atascado o encajado
    - En caso de que vea algo mal, atascado o producto caido: informar al staff para que lo solucione
    - Cuando no haya solucion, no encuentre personal: tranquilizarlo y Dar número XXXXXXX
 
-2. Pagó sin producto:
+4. Si el usuario es JUGADOR y pagó sin producto:
    - Explicar devolución automática (7 días), dependiendo del banco en un maximo de 7 dias se devuelve
    - Consultar si ve algun producto caido, atascado o encajado
    - Recomendar ayuda del staff en caso de que vea algo mal
    - Si no puede ver nada, porque la puerta no es transparente por ejemplo, que intente contactar al staff
-
-3. Usuario frustrado:
-   - Empatizar, pero no ser emocionado ni exagerado
-   - Dar consejos claros y no ofender
-   - Dar soluciones claras
-   - Mantener calma
-
-4. Sin staff disponible:
-   - Con pago: Asegurar reembolso y dar número
-   - Sin pago: Sugerir volver después, y si quiere intentarlo nuevamente la compra que lo haga siempre que no vea nada raro
 
 Mantén respuestas breves pero completas."""
 
@@ -170,18 +179,19 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                 user_state["role"] = role
                 if role == "jugador":
                     bot_response = (
-                        f"¿En qué puedo ayudarte {user_state['name']}?\n"
+                        f"¿En qué puedo ayudarte jugador {user_state['name']}?\n"
                         "1️⃣ Problema con la entrega de un producto\n"
                         "2️⃣ Problema con el pago\n"
                         "3️⃣ Problema con la máquina\n"
                         "4️⃣ Otras consultas"
                     )
-                else:
+                else:  # Para staff
                     bot_response = (
-                        "¿Qué problema estás observando?\n"
-                        "1️⃣ Producto no dispensado\n"
-                        "2️⃣ Problema con datáfono\n"
-                        "3️⃣ Otro"
+                        f"¿Qué tipo de problema necesitas resolver {user_state['name']}?\n"
+                        "1️⃣ Producto caído o atascado\n"
+                        "2️⃣ Problema con datáfono/pagos\n"
+                        "3️⃣ Necesito reiniciar la máquina\n"
+                        "4️⃣ Otro problema"
                     )
                 user_state["step"] = "problema"
             else:
