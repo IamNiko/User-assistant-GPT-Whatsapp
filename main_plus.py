@@ -5,12 +5,36 @@ from openai import OpenAI
 import re
 from typing import Dict, Any
 import json
+from decouple import config
 
 app = FastAPI()
 client = OpenAI(api_key=config('OPENAI_API_KEY'))
 twilio_client = Client(config('TWILIO_ACCOUNT_SID'), config('TWILIO_AUTH_TOKEN'))
 
-# Leer el prompt técnico desde el archivo
+def split_message(message: str, limit: int = 1500) -> list:
+    """
+    Divide un mensaje largo en partes más pequeñas respetando palabras completas.
+    Se usa 1500 como límite para tener margen de seguridad.
+    """
+    if len(message) <= limit:
+        return [message]
+    
+    parts = []
+    current_part = ""
+    words = message.split()
+    
+    for word in words:
+        if len(current_part) + len(word) + 1 <= limit:
+            current_part += (" " + word if current_part else word)
+        else:
+            parts.append(current_part)
+            current_part = word
+    
+    if current_part:
+        parts.append(current_part)
+    
+    return parts
+
 try:
     with open('Promp.txt', 'r', encoding='utf-8') as file:
         TECHNICAL_PROMPT = file.read()
@@ -19,7 +43,7 @@ except FileNotFoundError:
     TECHNICAL_PROMPT = "Error al cargar el prompt técnico"
 
 # Clave de acceso para técnicos (en producción debería estar en .env)
-TECH_ACCESS_KEY = "PKT2024"
+TECH_ACCESS_KEY = config("TECH_ACCESS_KEY")
 
 user_states = {}
 
@@ -228,6 +252,7 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                         "4️⃣ Otro problema"
                     )
                     user_state["step"] = "problema"
+
                 else:  # tecnico
                     bot_response = "Por favor, introduce la clave de acceso técnico:"
                     user_state["step"] = "validacion_tecnica"
@@ -238,7 +263,20 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             if incoming_msg == TECH_ACCESS_KEY:
                 user_state["tech_access"] = True
                 bot_response = (
-                    f"Acceso técnico concedido. ¿Qué necesitas consultar {user_state['name']}?\n"
+                    "⚠️ ACCESO TÉCNICO CONCEDIDO ⚠️\n\n"
+                    "PROCEDIMIENTO DE ACCESO AL SISTEMA:\n\n"
+                    "ACCESO FÍSICO:\n"
+                    "1. Localizar cofre en frente de máquina\n"
+                    "2. Ingresar código: 7527\n"
+                    "3. Retirar la llave\n"
+                    "4. Insertar llave en cerradura\n"
+                    "5. Tirar del panel para abrir\n\n"
+                    "ACCESO AL SISTEMA:\n"
+                    "1. En tablet, presionar 'admin'\n"
+                    "2. Pulsar cuadro blanco para teclado\n"
+                    "3. Cambiar a teclado numérico\n"
+                    "4. Ingresar: 123456\n\n"
+                    "Una vez dentro, ¿qué necesitas consultar?\n"
                     "1️⃣ Diagnóstico de errores\n"
                     "2️⃣ Configuración de sistema\n"
                     "3️⃣ Mantenimiento preventivo\n"
@@ -299,46 +337,67 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                     )
 
         elif user_state["step"] in ["diagnostico_errores", "config_sistema", "mantenimiento", "calibracion"]:
-            if incoming_msg == "4":  # Volver al menú principal
-                bot_response = (
-                    f"¿Qué necesitas consultar {user_state['name']}?\n"
-                    "1️⃣ Diagnóstico de errores\n"
-                    "2️⃣ Configuración de sistema\n"
-                    "3️⃣ Mantenimiento preventivo\n"
-                    "4️⃣ Calibración de componentes"
-                )
-                user_state["step"] = "menu_tecnico"
-            else:
-                if user_state["step"] == "diagnostico_errores":
-                    if incoming_msg.upper().startswith('E'):
-                        # Consulta de código de error específico
-                        user_state["conversation_history"].append({"role": "user", "content": f"Proporciona información técnica detallada sobre el error {incoming_msg}"})
+                    if incoming_msg.lower() in ["ver acceso", "procedimiento", "como accedo", "acceso"]:
+                        bot_response = (
+                            "📋 PROCEDIMIENTO DE ACCESO AL SISTEMA 📋\n\n"
+                            "ACCESO FÍSICO:\n"
+                            "1. Localizar cofre en frente de máquina\n"
+                            "2. Ingresar código: 7527\n"
+                            "3. Retirar la llave\n"
+                            "4. Insertar llave en cerradura\n"
+                            "5. Tirar del panel para abrir\n\n"
+                            "ACCESO AL SISTEMA:\n"
+                            "1. En tablet, presionar 'admin'\n"
+                            "2. Pulsar cuadro blanco para teclado\n"
+                            "3. Cambiar a teclado numérico\n"
+                            "4. Ingresar: 123456\n\n"
+                            "¿Deseas continuar con tu consulta anterior?"
+                        )
+                    elif incoming_msg == "4":  # Volver al menú principal
+                        bot_response = (
+                            f"¿Qué necesitas consultar {user_state['name']}?\n"
+                            "1️⃣ Diagnóstico de errores\n"
+                            "2️⃣ Configuración de sistema\n"
+                            "3️⃣ Mantenimiento preventivo\n"
+                            "4️⃣ Calibración de componentes"
+                        )
+                        user_state["step"] = "menu_tecnico"
                     else:
-                        # Consulta general de diagnóstico
-                        user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre: {incoming_msg}"})
-                else:
-                    # Para otros menús técnicos
-                    user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre la opción {incoming_msg} del menú {user_state['step']}"})
-                
-                bot_response = get_gpt4_response(user_state["conversation_history"][-1]["content"], user_state)
-                user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
+                        if user_state["step"] == "diagnostico_errores":
+                            if incoming_msg.upper().startswith('E'):
+                                # Consulta de código de error específico
+                                user_state["conversation_history"].append({"role": "user", "content": f"Proporciona información técnica detallada sobre el error {incoming_msg}"})
+                            else:
+                                # Consulta general de diagnóstico
+                                user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre: {incoming_msg}"})
+                        else:
+                            # Para otros menús técnicos
+                            user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre la opción {incoming_msg} del menú {user_state['step']}"})
+                    
+                        bot_response = get_gpt4_response(user_state["conversation_history"][-1]["content"], user_state)
+                        user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
         else:
             if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago", incoming_msg.lower()):
                 user_state["has_paid"] = True
-
             user_state["conversation_history"].append({"role": "user", "content": incoming_msg})
             bot_response = get_gpt4_response(incoming_msg, user_state)
             user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
         user_states[sender] = user_state
-        twilio_client.messages.create(
-            body=bot_response,
-            from_='whatsapp:+14155238886',
-            to=sender
-        )
+        
+        # Dividir y enviar el mensaje en partes si es necesario
+        message_parts = split_message(bot_response)
+        for part in message_parts:
+            twilio_client.messages.create(
+                body=part,
+                from_='whatsapp:+14155238886',
+                to=sender
+            )
+        
         return {"status": "success"}
         
     except Exception as e:
         print(f"Error: {e}")
+        return {"status": "error", "message": str(e)}
         return {"status": "error", "message": str(e)}
