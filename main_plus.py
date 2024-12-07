@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models import Conversation, SessionLocal
 
+def update_user_state(sender: str, state: Dict):
+    """Actualiza el estado del usuario en el diccionario global."""
+    user_states[sender] = state
+
 app = FastAPI()
 client = OpenAI(api_key=config('OPENAI_API_KEY'))
 twilio_client = Client(config('TWILIO_ACCOUNT_SID'), config('TWILIO_AUTH_TOKEN'))
@@ -16,26 +20,33 @@ twilio_client = Client(config('TWILIO_ACCOUNT_SID'), config('TWILIO_AUTH_TOKEN')
 def split_message(message: str, limit: int = 1500) -> list:
     """
     Divide un mensaje largo en partes más pequeñas respetando palabras completas.
-    Se usa 1500 como límite para tener margen de seguridad.
+    Optimizada para manejar palabras largas y asegurar buen rendimiento.
     """
     if len(message) <= limit:
         return [message]
-    
-    parts = []
-    current_part = ""
+
     words = message.split()
-    
+    parts = []
+    current_part = []
+
     for word in words:
-        if len(current_part) + len(word) + 1 <= limit:
-            current_part += (" " + word if current_part else word)
+        # Si una palabra sola supera el límite, se corta.
+        if len(word) > limit:
+            if current_part:
+                parts.append(" ".join(current_part))
+                current_part = []
+            parts.extend([word[i:i+limit] for i in range(0, len(word), limit)])
+        elif sum(len(w) + 1 for w in current_part) + len(word) <= limit:
+            current_part.append(word)
         else:
-            parts.append(current_part)
-            current_part = word
-    
+            parts.append(" ".join(current_part))
+            current_part = [word]
+
     if current_part:
-        parts.append(current_part)
-    
+        parts.append(" ".join(current_part))
+
     return parts
+
 
 try:
     with open('Prompt_Bas.txt', 'r', encoding='utf-8') as file:
@@ -180,10 +191,13 @@ async def whatsapp_webhook(
         })
 
         if user_state["step"] == "inicio":
+            update_user_state(sender, user_state)
             bot_response = "¡Hola! Soy el asistente de P-KAP. ¿Podrías decirme tu nombre?"
             user_state["step"] = "nombre"
+            update_user_state(sender, user_state)
 
         elif user_state["step"] == "nombre":
+            update_user_state(sender, user_state)
             if user_state.get("name"):
                 bot_response = (
                     f"¡Gracias {user_state['name']}! ¿Eres jugador, personal del club o servicio técnico?\n"
@@ -192,6 +206,7 @@ async def whatsapp_webhook(
                     "3️⃣ Servicio Técnico"
                 )
                 user_state["step"] = "rol"
+                update_user_state(sender, user_state)
             elif not is_valid_name(incoming_msg):
                 if "llamo" in incoming_msg.lower() and "nicolas" in incoming_msg.lower():
                     user_state["name"] = "Nicolas"
@@ -202,6 +217,7 @@ async def whatsapp_webhook(
                         "3️⃣ Servicio Técnico"
                     )
                     user_state["step"] = "rol"
+                    update_user_state(sender, user_state)
                 else:
                     name_question = f"El usuario respondió '{incoming_msg}' cuando le pedí su nombre. Da una respuesta empática y amable explicando por qué necesitas su nombre real."
                     bot_response = get_gpt4_response(name_question, user_state, db)
@@ -214,8 +230,10 @@ async def whatsapp_webhook(
                     "3️⃣ Servicio Técnico"
                 )
                 user_state["step"] = "rol"
+                update_user_state(sender, user_state)
 
         elif user_state["step"] == "rol":
+            update_user_state(sender, user_state)
             role = detect_role(incoming_msg)
             if role:
                 user_state["role"] = role
@@ -228,6 +246,7 @@ async def whatsapp_webhook(
                         "4️⃣ Otras consultas"
                     )
                     user_state["step"] = "problema"
+                    update_user_state(sender, user_state)
                     
                 elif role == "staff":
                     bot_response = (
@@ -238,13 +257,16 @@ async def whatsapp_webhook(
                         "4️⃣ Otro problema"
                     )
                     user_state["step"] = "problema"
+                    update_user_state(sender, user_state)
                 else:  # tecnico
                     bot_response = "Por favor, introduce la clave de acceso técnico:"
                     user_state["step"] = "validacion_tecnica"
+                    update_user_state(sender, user_state)
             else:
                 bot_response = "Por favor indica si eres jugador (1), staff (2) o servicio técnico (3)"
 
         elif user_state["step"] == "problema":
+            update_user_state(sender, user_state)
             if incoming_msg == "1":  # Problema con la entrega de un producto
                 bot_response = (
                     "¡Entendido! ¿Qué problema estás experimentando exactamente?\n"
@@ -254,6 +276,7 @@ async def whatsapp_webhook(
                     "4️⃣ Otro problema con la entrega de un producto"
                 )
                 user_state["step"] = "detalle_problema"
+                update_user_state(sender, user_state)
             elif incoming_msg == "2":  # Problema con el pago
                 bot_response = (
                     "Lo siento mucho por el inconveniente con el pago. Por favor, indícame más detalles:\n"
@@ -262,6 +285,7 @@ async def whatsapp_webhook(
                     "3️⃣ Otro problema relacionado con el pago"
                 )
                 user_state["step"] = "detalle_pago"
+                update_user_state(sender, user_state)
             elif incoming_msg == "3":  # Problema con la máquina
                 bot_response = (
                     "Gracias por informarlo. Por favor, selecciona la descripción que mejor se ajuste:\n"
@@ -271,6 +295,7 @@ async def whatsapp_webhook(
                     "4️⃣ Otro problema técnico con la máquina"
                 )
                 user_state["step"] = "detalle_maquina"
+                update_user_state(sender, user_state)
             elif incoming_msg == "4":  # Otras consultas
                 bot_response = (
                     "¡Entendido! Por favor, indícame cómo puedo ayudarte:\n"
@@ -280,6 +305,7 @@ async def whatsapp_webhook(
                     "4️⃣ Otro tipo de consulta"
                 )
                 user_state["step"] = "detalle_otros"
+                update_user_state(sender, user_state)
             else:  # Opción no válida
                 bot_response = (
                     "Por favor, selecciona una opción válida:\n"
@@ -291,6 +317,7 @@ async def whatsapp_webhook(
 
 
         elif user_state["step"] == "detalle_problema":
+            update_user_state(sender, user_state)
             if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago|si|exacto|efectivamente|claro", incoming_msg.lower()):
                 user_state["has_paid"] = True
             
@@ -305,6 +332,7 @@ async def whatsapp_webhook(
             user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
         elif user_state["step"] == "validacion_tecnica":
+            update_user_state(sender, user_state)
             if incoming_msg == TECH_ACCESS_KEY:
                 user_state["tech_access"] = True
                 bot_response = (
@@ -328,13 +356,16 @@ async def whatsapp_webhook(
                     "4️⃣ Calibración de componentes"
                 )
                 user_state["step"] = "menu_tecnico"
+                update_user_state(sender, user_state)
             else:
                 bot_response = "Clave incorrecta. Por favor, intenta de nuevo o contacta a soporte."
 
         elif user_state["step"] == "menu_tecnico":
+            update_user_state(sender, user_state)
             if not user_state.get("tech_access"):
                 bot_response = "No tienes acceso técnico validado. Por favor, introduce la clave de acceso."
                 user_state["step"] = "validacion_tecnica"
+                update_user_state(sender, user_state)
 
             else:
                 if incoming_msg == "1":
@@ -346,6 +377,7 @@ async def whatsapp_webhook(
                         "4️⃣ Volver al menú principal"
                     )
                     user_state["step"] = "diagnostico_errores"
+                    update_user_state(sender, user_state)
                 elif incoming_msg == "2":
                     bot_response = (
                         "Configuración de sistema. Selecciona:\n"
@@ -355,6 +387,7 @@ async def whatsapp_webhook(
                         "4️⃣ Volver al menú principal"
                     )
                     user_state["step"] = "config_sistema"
+                    update_user_state(sender, user_state)
                 elif incoming_msg == "3":
                     bot_response = (
                         "Mantenimiento preventivo:\n"
@@ -364,6 +397,7 @@ async def whatsapp_webhook(
                         "4️⃣ Volver al menú principal"
                     )
                     user_state["step"] = "mantenimiento"
+                    update_user_state(sender, user_state)
                 elif incoming_msg == "4":
                     bot_response = (
                         "Calibración de componentes:\n"
@@ -373,6 +407,7 @@ async def whatsapp_webhook(
                         "4️⃣ Volver al menú principal"
                     )
                     user_state["step"] = "calibracion"
+                    update_user_state(sender, user_state)
                 else:
                     bot_response = (
                         f"Opción no válida. ¿Qué necesitas consultar {user_state['name']}?\n"
@@ -408,8 +443,10 @@ async def whatsapp_webhook(
                             "4️⃣ Calibración de componentes"
                         )
                         user_state["step"] = "menu_tecnico"
+                        update_user_state(sender, user_state)
                     else:
                         if user_state["step"] == "diagnostico_errores":
+                            update_user_state(sender, user_state)
                             if incoming_msg.upper().startswith('E'):
                                 # Consulta de código de error específico
                                 content = f"Proporciona información técnica detallada sobre el error {incoming_msg}"
