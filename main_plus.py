@@ -1,11 +1,13 @@
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Depends
 from twilio.rest import Client
 from decouple import config
 from openai import OpenAI
 import re
 from typing import Dict, Any
 import json
-from decouple import config
+from sqlalchemy.orm import Session
+from db import get_db
+from models import Conversation, SessionLocal
 
 app = FastAPI()
 client = OpenAI(api_key=config('OPENAI_API_KEY'))
@@ -47,55 +49,15 @@ TECH_ACCESS_KEY = config("TECH_ACCESS_KEY")
 
 user_states = {}
 
-SYSTEM_PROMPT = """Eres un asistente amable para máquinas expendedoras P-KAP. Estás ayudando a un usuario con problemas. Continuar siempre con el hilo de la conversación, no volver a empezar a menos que haya pasado 10 minitos
+try:
+    with open('Prompt_Bas.txt', 'r', encoding='utf-8') as file:
+        prompt_content = file.read()
+        TECHNICAL_PROMPT = prompt_content
+        SYSTEM_PROMPT = prompt_content
+except FileNotFoundError:
+    TECHNICAL_PROMPT = "No se pudo cargar el prompt técnico."
+    SYSTEM_PROMPT = "No se pudo cargar el prompt de usuario."
 
-Contexto actual:
-- Nombre: {name}
-- Rol: {role}
-- Estado: {step}
-- Pagó: {has_paid}
-- Acceso técnico: {tech_access}
-
-DIRECTRICES:
-1. Si el usuario es STAFF y hay producto caído/atascado:
-   - Indicar los pasos para abrir la puerta
-   - Guiar para retirar el producto con cuidado
-   - Indicar cómo colocarlo correctamente en su lugar
-   - Recordar reiniciar la máquina después
-   - Método de reinicio recomendado: Presionar botón rojo en la cajita del cable de alimentación
-   - Método alternativo de reinicio:
-     a. Abrir la puerta
-     b. Sacar el panel de pagos
-     c. Localizar el cajón con interruptor rojo abajo
-     d. Apagar
-     e. Esperar 10 segundos
-     f. Volver a encender
-
-2. Si el usuario es STAFF y hay problema con el datáfono:
-   - Verificar si es problema de cobertura o está pillado
-   - Guiar para reiniciar la máquina usando preferentemente el método del botón rojo en el cable
-   - Si el problema persiste, guiar para el método alternativo de reinicio
-
-3. Si el usuario es JUGADOR y tiene producto caído/atascado:
-   - Si pagó: Tranquilizar sobre reembolso
-   - Consultar si ve algun producto caido, atascado o encajado
-   - En caso de que vea algo mal, atascado o producto caido: informar al staff para que lo solucione
-   - Cuando no haya solucion, no encuentre personal: tranquilizarlo y Dar número XXXXXXX
-
-4. Si el usuario es JUGADOR y pagó sin producto:
-   - Explicar devolución automática (7 días), dependiendo del banco en un maximo de 7 dias se devuelve
-   - Consultar si ve algun producto caido, atascado o encajado
-   - Recomendar ayuda del staff en caso de que vea algo mal
-   - Si no puede ver nada, porque la puerta no es transparente por ejemplo, que intente contactar al staff
-
-5. Si el usuario es SERVICIO TÉCNICO:
-   - Proporcionar información técnica detallada según el prompt técnico
-   - Permitir acceso a configuraciones avanzadas
-   - Guiar en diagnóstico y reparación
-   - Proporcionar códigos de error específicos
-   - Asistir en calibración y mantenimiento
-
-Mantén respuestas breves pero completas."""
 
 def is_valid_name(message: str) -> bool:
     invalid_words = {
@@ -110,13 +72,12 @@ def is_valid_name(message: str) -> bool:
     text = message.lower().strip()
     words = text.split()
     
-    # Validaciones
-    if (len(words) == 0 or                           # Vacío
-        any(word in invalid_words for word in words) or  # Palabras inválidas
-        len(text) > 20 or                            # Muy largo
-        re.search(r'[0-9@#$%^&*(),.?":{}|<>]', text) or  # Símbolos/números
-        any(x in text for x in ['porque', 'para que', 'por que', '?', '!', 'jaja', 'test']) or  # Preguntas/risas
-        len(re.sub(r'[^a-zA-ZáéíóúñÁÉÍÓÚÑ\s]', '', text)) < 2):  # Muy corto sin símbolos
+    if (len(words) == 0 or
+        any(word in invalid_words for word in words) or
+        len(text) > 20 or
+        re.search(r'[0-9@#$%^&*(),.?":{}|<>]', text) or
+        any(x in text for x in ['porque', 'para que', 'por que', '?', '!', 'jaja', 'test']) or
+        len(re.sub(r'[^a-zA-ZáéíóúñÁÉÍÓÚÑ\s]', '', text)) < 2):
         return False
     return True
 
@@ -126,7 +87,7 @@ def clean_name(name: str) -> str:
         r'^(?:soy\s+)',
         r'^(?:mi\s+nombre\s+es\s+)',
         r'^(?:ok\s+)',
-        r'^(?:vale\s+vale\s+)',  # Agregamos este patrón
+        r'^(?:vale\s+vale\s+)',
         r'^(?:vale\s+)',
         r'^(?:hola\s+)',
         r'^(?:yo\s+)',
@@ -137,7 +98,6 @@ def clean_name(name: str) -> str:
     for prefix in prefixes:
         name = re.sub(prefix, '', name)
     
-    # Capitalizar cada palabra
     return ' '.join(word.capitalize() for word in name.split())
 
 def detect_role(message: str) -> str:
@@ -154,34 +114,56 @@ def detect_role(message: str) -> str:
         return "tecnico"
     return None
 
-def get_gpt4_response(message: str, context: Dict[str, Any]) -> str:
+def get_gpt4_response(message: str, context: Dict[str, Any], db: Session) -> str:
     try:
-        # Seleccionar el prompt adecuado según el rol y acceso técnico
         if context.get("role") == "tecnico" and context.get("tech_access"):
-            system_content = TECHNICAL_PROMPT
+            with open("Prompt_Bas.txt", "r", encoding="utf-8") as f:
+                system_content = f.read()
+
         else:
-            system_content = SYSTEM_PROMPT.format(**context)
+            with open("Prompt_Bas.txt", "r", encoding="utf-8") as f:
+                system_content = f.read()
+
 
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": message}
         ]
         
-        if context.get("conversation_history"):
-            for msg in context["conversation_history"][-3:]:
-                messages.append({"role": msg["role"], "content": msg["content"]})
+        # Obtener historial reciente de la base de datos
+        recent_conversations = (
+            db.query(Conversation)
+            .filter(Conversation.sender == context.get("sender"))
+            .order_by(Conversation.id.desc())
+            .limit(3)
+            .all()
+        )
+        
+        for conv in reversed(recent_conversations):
+            messages.extend([
+                {"role": "user", "content": conv.message},
+                {"role": "assistant", "content": conv.response}
+            ])
 
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages
         )
         return response.choices[0].message.content
+    
+    except FileNotFoundError:
+        print("Error: El archivo Prompt_Bas.txt no se encontró.")
+        return "Lo siento, no pude acceder a las instrucciones del sistema. Intenta más tarde."
     except Exception as e:
         print(f"GPT-4 Error: {e}")
         return f"Lo siento {context.get('name', '')}, ¿podrías reformular tu pregunta?"
 
 @app.post("/webhook")
-async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
+async def whatsapp_webhook(
+    Body: str = Form(...),
+    From: str = Form(...),
+    db: Session = Depends(get_db)
+):
     print(f"Solicitud recibida. Body: {Body}, From: {From}")
 
     try:
@@ -193,7 +175,8 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             "role": None,
             "has_paid": False,
             "tech_access": False,
-            "conversation_history": []
+            "sender": sender,
+            "conversation_history": [] 
         })
 
         if user_state["step"] == "inicio":
@@ -201,7 +184,7 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             user_state["step"] = "nombre"
 
         elif user_state["step"] == "nombre":
-            if user_state.get("name"):  # Si ya tenemos un nombre guardado
+            if user_state.get("name"):
                 bot_response = (
                     f"¡Gracias {user_state['name']}! ¿Eres jugador, personal del club o servicio técnico?\n"
                     "1️⃣ Jugador\n"
@@ -221,7 +204,7 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                     user_state["step"] = "rol"
                 else:
                     name_question = f"El usuario respondió '{incoming_msg}' cuando le pedí su nombre. Da una respuesta empática y amable explicando por qué necesitas su nombre real."
-                    bot_response = get_gpt4_response(name_question, user_state)
+                    bot_response = get_gpt4_response(name_question, user_state, db)
             else:
                 user_state["name"] = clean_name(incoming_msg)
                 bot_response = (
@@ -245,6 +228,7 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                         "4️⃣ Otras consultas"
                     )
                     user_state["step"] = "problema"
+                    
                 elif role == "staff":
                     bot_response = (
                         f"¿Qué tipo de problema necesitas resolver {user_state['name']}?\n"
@@ -254,12 +238,71 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                         "4️⃣ Otro problema"
                     )
                     user_state["step"] = "problema"
-
                 else:  # tecnico
                     bot_response = "Por favor, introduce la clave de acceso técnico:"
                     user_state["step"] = "validacion_tecnica"
             else:
                 bot_response = "Por favor indica si eres jugador (1), staff (2) o servicio técnico (3)"
+
+        elif user_state["step"] == "problema":
+            if incoming_msg == "1":  # Problema con la entrega de un producto
+                bot_response = (
+                    "¡Entendido! ¿Qué problema estás experimentando exactamente?\n"
+                    "1️⃣ El producto que quería no se entregó\n"
+                    "2️⃣ Pagué, pero no recibí nada\n"
+                    "3️⃣ Veo un producto atascado/caído en la máquina\n"
+                    "4️⃣ Otro problema con la entrega de un producto"
+                )
+                user_state["step"] = "detalle_problema"
+            elif incoming_msg == "2":  # Problema con el pago
+                bot_response = (
+                    "Lo siento mucho por el inconveniente con el pago. Por favor, indícame más detalles:\n"
+                    "1️⃣ Pagué pero no recibí el producto\n"
+                    "2️⃣ No aparece el cargo en mi cuenta\n"
+                    "3️⃣ Otro problema relacionado con el pago"
+                )
+                user_state["step"] = "detalle_pago"
+            elif incoming_msg == "3":  # Problema con la máquina
+                bot_response = (
+                    "Gracias por informarlo. Por favor, selecciona la descripción que mejor se ajuste:\n"
+                    "1️⃣ La máquina no responde\n"
+                    "2️⃣ Las luces no funcionan\n"
+                    "3️⃣ El sistema de pago no funciona\n"
+                    "4️⃣ Otro problema técnico con la máquina"
+                )
+                user_state["step"] = "detalle_maquina"
+            elif incoming_msg == "4":  # Otras consultas
+                bot_response = (
+                    "¡Entendido! Por favor, indícame cómo puedo ayudarte:\n"
+                    "1️⃣ Información sobre el funcionamiento de la máquina\n"
+                    "2️⃣ Consultar políticas de reembolso\n"
+                    "3️⃣ Contactar con soporte técnico\n"
+                    "4️⃣ Otro tipo de consulta"
+                )
+                user_state["step"] = "detalle_otros"
+            else:  # Opción no válida
+                bot_response = (
+                    "Por favor, selecciona una opción válida:\n"
+                    "1️⃣ Problema con la entrega de un producto\n"
+                    "2️⃣ Problema con el pago\n"
+                    "3️⃣ Problema con la máquina\n"
+                    "4️⃣ Otras consultas"
+                )
+
+
+        elif user_state["step"] == "detalle_problema":
+            if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago|si|exacto|efectivamente|claro", incoming_msg.lower()):
+                user_state["has_paid"] = True
+            
+            # Determinar el contexto basado en la pregunta actual
+            if "club" in incoming_msg.lower() or "personal" in incoming_msg.lower() or "alguien" in incoming_msg.lower():
+                content = "El usuario pregunta sobre buscar personal del club para ayuda. Como jugador que ya pagó, ¿qué debería responderle?"
+            else:
+                content = incoming_msg
+            
+            user_state["conversation_history"].append({"role": "user", "content": content})
+            bot_response = get_gpt4_response(content, user_state, db)
+            user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
         elif user_state["step"] == "validacion_tecnica":
             if incoming_msg == TECH_ACCESS_KEY:
@@ -292,6 +335,7 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
             if not user_state.get("tech_access"):
                 bot_response = "No tienes acceso técnico validado. Por favor, introduce la clave de acceso."
                 user_state["step"] = "validacion_tecnica"
+
             else:
                 if incoming_msg == "1":
                     bot_response = (
@@ -368,26 +412,65 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
                         if user_state["step"] == "diagnostico_errores":
                             if incoming_msg.upper().startswith('E'):
                                 # Consulta de código de error específico
-                                user_state["conversation_history"].append({"role": "user", "content": f"Proporciona información técnica detallada sobre el error {incoming_msg}"})
+                                content = f"Proporciona información técnica detallada sobre el error {incoming_msg}"
                             else:
                                 # Consulta general de diagnóstico
-                                user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre: {incoming_msg}"})
+                                content = f"Como técnico, necesito información sobre: {incoming_msg}"
                         else:
                             # Para otros menús técnicos
-                            user_state["conversation_history"].append({"role": "user", "content": f"Como técnico, necesito información sobre la opción {incoming_msg} del menú {user_state['step']}"})
-                    
-                        bot_response = get_gpt4_response(user_state["conversation_history"][-1]["content"], user_state)
+                            content = f"Como técnico, necesito información sobre la opción {incoming_msg} del menú {user_state['step']}"
+                        
+                        if "conversation_history" not in user_state:
+                            user_state["conversation_history"] = []
+                        
+                        user_state["conversation_history"].append({"role": "user", "content": content})
+                        bot_response = get_gpt4_response(content, user_state, db)
                         user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
-        else:
-            if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago", incoming_msg.lower()):
+                    if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago|si|exacto|efectivamente|claro", incoming_msg.lower()):
+                        user_state["has_paid"] = True
+
+                    user_states[sender] = user_state
+
+                    # Guardar en la base de datos
+                    conversation = Conversation(
+                        sender=sender,
+                        message=incoming_msg,
+                        response=bot_response
+                    )
+                    db.add(conversation)
+                    db.commit()
+
+                    # Dividir y enviar el mensaje en partes si es necesario
+                    message_parts = split_message(bot_response)
+                    for part in message_parts:
+                        twilio_client.messages.create(
+                            body=part,
+                            from_='whatsapp:+14155238886',
+                            to=sender
+                        )
+
+                    return {"status": "success"}
+        
+        else:  # Para usuarios no técnicos o consultas generales
+            if re.search(r"(?:he|ya)\s+(?:pagado|comprado)|hice\s+(?:el\s+)?pago|si|exacto|efectivamente|claro", incoming_msg.lower()):
                 user_state["has_paid"] = True
+            
             user_state["conversation_history"].append({"role": "user", "content": incoming_msg})
-            bot_response = get_gpt4_response(incoming_msg, user_state)
+            bot_response = get_gpt4_response(incoming_msg, user_state, db)
             user_state["conversation_history"].append({"role": "assistant", "content": bot_response})
 
         user_states[sender] = user_state
         
+        # Guardar en la base de datos
+        conversation = Conversation(
+            sender=sender,
+            message=incoming_msg,
+            response=bot_response
+        )
+        db.add(conversation)
+        db.commit()
+
         # Dividir y enviar el mensaje en partes si es necesario
         message_parts = split_message(bot_response)
         for part in message_parts:
@@ -401,5 +484,5 @@ async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
         
     except Exception as e:
         print(f"Error: {e}")
-        return {"status": "error", "message": str(e)}
+        db.rollback()  # Revertir la transacción en caso de error
         return {"status": "error", "message": str(e)}
