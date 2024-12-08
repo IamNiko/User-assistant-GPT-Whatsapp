@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, Form, HTTPException, Depends
 from twilio.rest import Client
 from decouple import config
@@ -9,8 +10,20 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models import Conversation, SessionLocal
 
-def update_user_state(sender: str, state: Dict):
-    """Actualiza el estado del usuario en el diccionario global."""
+def update_user_state(sender: str, state: Dict[str, Any]) -> None:
+    """
+    Actualiza el estado del usuario en el diccionario global.
+
+    Este método es utilizado para actualizar el estado del usuario después de
+    recibir un mensaje o después de enviar una respuesta. El estado del usuario
+    se almacena en el diccionario global `user_states` utilizando el número de
+    teléfono del usuario como clave.
+
+    Args:
+        sender (str): Número de teléfono del usuario.
+        state (Dict[str, Any]): Diccionario que contiene el nuevo estado del
+            usuario.
+    """
     user_states[sender] = state
 
 app = FastAPI()
@@ -19,29 +32,43 @@ twilio_client = Client(config('TWILIO_ACCOUNT_SID'), config('TWILIO_AUTH_TOKEN')
 
 def split_message(message: str, limit: int = 1500) -> list:
     """
-    Divide un mensaje largo en partes más pequeñas respetando palabras completas.
-    Optimizada para manejar palabras largas y asegurar buen rendimiento.
+    Splits a long message into smaller parts while respecting complete words.
+    Optimized to handle long words and ensure good performance.
+
+    Args:
+        message (str): The message to be split.
+        limit (int): The maximum length of each split part. Defaults to 1500.
+
+    Returns:
+        list: A list of strings where each string is a part of the original message 
+              not exceeding the specified limit.
     """
+    # Return the message as a single part if it's within the limit
     if len(message) <= limit:
         return [message]
 
-    words = message.split()
-    parts = []
-    current_part = []
+    words = message.split()  # Split message into words
+    parts = []  # List to store the parts of the message
+    current_part = []  # Current part being constructed
 
     for word in words:
-        # Si una palabra sola supera el límite, se corta.
+        # If a single word exceeds the limit, split the word itself
         if len(word) > limit:
             if current_part:
+                # Append the current part to parts if not empty
                 parts.append(" ".join(current_part))
                 current_part = []
+            # Split the long word into chunks of the specified limit
             parts.extend([word[i:i+limit] for i in range(0, len(word), limit)])
         elif sum(len(w) + 1 for w in current_part) + len(word) <= limit:
+            # Add word to the current part if it fits within the limit
             current_part.append(word)
         else:
+            # Otherwise, finalize the current part and start a new one
             parts.append(" ".join(current_part))
             current_part = [word]
 
+    # Append any remaining words in the current part
     if current_part:
         parts.append(" ".join(current_part))
 
@@ -71,7 +98,21 @@ except FileNotFoundError:
 
 
 def is_valid_name(message: str) -> bool:
+    """
+    Checks if the given message is a valid name.
+
+    Returns False if the message is empty, contains invalid words, is too long,
+    contains special characters, or has a length of less than 2 without
+    considering special characters.
+
+    Args:
+        message (str): The message to be validated.
+
+    Returns:
+        bool: True if the message is a valid name, False otherwise.
+    """
     invalid_words = {
+        # Common words that are not valid names
         'ok', 'vale', 'bien', 'bueno', 'si', 'no', 'hola', 
         'para', 'por', 'que', 'cual', 'como', 'cuando',
         'porque', 'nose', 'nose', 'nop', 'yes', 'yeah',
@@ -79,21 +120,48 @@ def is_valid_name(message: str) -> bool:
         'entendido', 'entendi', 'comprendo', 'comprendido',
         'ya', 'te', 'he', 'dicho', 'dije'
     }
-    
+
     text = message.lower().strip()
     words = text.split()
-    
-    if (len(words) == 0 or
-        any(word in invalid_words for word in words) or
-        len(text) > 20 or
-        re.search(r'[0-9@#$%^&*(),.?":{}|<>]', text) or
-        any(x in text for x in ['porque', 'para que', 'por que', '?', '!', 'jaja', 'test']) or
-        len(re.sub(r'[^a-zA-ZáéíóúñÁÉÍÓÚÑ\s]', '', text)) < 2):
+
+    # Check if the message is empty or contains invalid words
+    if len(words) == 0 or any(word in invalid_words for word in words):
         return False
+
+    # Check if the message is too long
+    if len(text) > 20:
+        return False
+
+    # Check if the message contains special characters
+    if re.search(r'[0-9@#$%^&*(),.?":{}|<>]', text):
+        return False
+
+    # Check if the message contains specific phrases
+    if any(x in text for x in ['porque', 'para que', 'por que', '?', '!', 'jaja', 'test']):
+        return False
+
+    # Check if the message has a length of less than 2 without considering special characters
+    if len(re.sub(r'[^a-zA-ZáéíóúñÁÉÍÓÚÑ\s]', '', text)) < 2:
+        return False
+
     return True
 
+
 def clean_name(name: str) -> str:
+    """
+    Cleans and formats a given name.
+
+    It removes common prefixes from the name, such as "me llamo", "soy", "mi nombre es", etc.
+    Then it capitalizes each word in the name and joins them with spaces.
+
+    Args:
+        name (str): The name to be cleaned and formatted.
+
+    Returns:
+        str: The cleaned and formatted name.
+    """
     prefixes = [
+        # Remove common prefixes from the name
         r'^(?:me\s+llamo\s+)',
         r'^(?:soy\s+)',
         r'^(?:mi\s+nombre\s+es\s+)',
@@ -112,36 +180,81 @@ def clean_name(name: str) -> str:
     return ' '.join(word.capitalize() for word in name.split())
 
 def detect_role(message: str) -> str:
-    jugador = [r'j', r'jug', r'jugador', r'player', r'juego', r'tenista', r'1']
-    staff = [r's', r'sta', r'staff', r'empleado', r'personal', r'trabajo', r'2']
-    tecnico = [r't', r'tec', r'tecnico', r'servicio', r'mantenimiento', r'3']
-    
+    """
+    Detects the role of the user based on the message provided.
+
+    The role can be either "jugador", "staff", or "tecnico".
+    If no role is detected, it returns None.
+
+    Args:
+        message (str): The message to be analyzed.
+
+    Returns:
+        str: The detected role, or None if no role is detected.
+    """
+    # The following are some common words that can be used to detect the role
+    jugador = [
+        r'j', r'jug', r'jugador', r'player', r'juego', r'tenista', r'1'
+    ]
+    staff = [
+        r's', r'sta', r'staff', r'empleado', r'personal', r'trabajo', r'2'
+    ]
+    tecnico = [
+        r't', r'tec', r'tecnico', r'servicio', r'mantenimiento', r'3'
+    ]
+
+    # Convert the message to lowercase to make it case-insensitive
     msg = message.lower()
+
+    # Check if any of the words in the jugador pattern are present in the message
     if any(re.search(pattern, msg) for pattern in jugador):
         return "jugador"
+
+    # Check if any of the words in the staff pattern are present in the message
     if any(re.search(pattern, msg) for pattern in staff):
         return "staff"
+
+    # Check if any of the words in the tecnico pattern are present in the message
     if any(re.search(pattern, msg) for pattern in tecnico):
         return "tecnico"
+
+    # If none of the above conditions are met, return None
     return None
 
+
 def get_gpt4_response(message: str, context: Dict[str, Any], db: Session) -> str:
+    """
+    Gets a response from the GPT-4 model based on the message and context provided.
+
+    Args:
+        message (str): The message to be analyzed.
+        context (Dict[str, Any]): The context of the user, including the role, name, and previous conversations.
+        db (Session): The SQLAlchemy session to access the database.
+
+    Returns:
+        str: The response from the GPT-4 model.
+    """
     try:
+        # Select the appropriate prompt based on the role and tech access
         if context.get("role") == "tecnico" and context.get("tech_access"):
             with open("Prompt_Bas.txt", "r", encoding="utf-8") as f:
+                # Read the prompt from the file
                 system_content = f.read()
 
         else:
             with open("Prompt_Bas.txt", "r", encoding="utf-8") as f:
+                # Read the prompt from the file
                 system_content = f.read()
 
-
+        # Create the messages for the GPT-4 model
         messages = [
+            # The system message contains the prompt
             {"role": "system", "content": system_content},
+            # The user message is the message to be analyzed
             {"role": "user", "content": message}
         ]
-        
-        # Obtener historial reciente de la base de datos
+
+        # Get the recent conversation history from the database
         recent_conversations = (
             db.query(Conversation)
             .filter(Conversation.sender == context.get("sender"))
@@ -149,23 +262,31 @@ def get_gpt4_response(message: str, context: Dict[str, Any], db: Session) -> str
             .limit(3)
             .all()
         )
-        
+
+        # Add the conversation history to the messages
         for conv in reversed(recent_conversations):
             messages.extend([
+                # The user message is the message from the conversation history
                 {"role": "user", "content": conv.message},
+                # The assistant message is the response from the conversation history
                 {"role": "assistant", "content": conv.response}
             ])
 
+        # Create the response from the GPT-4 model
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages
         )
+
+        # Return the response
         return response.choices[0].message.content
     
     except FileNotFoundError:
+        # Handle the error if the file is not found
         print("Error: El archivo Prompt_Bas.txt no se encontró.")
         return "Lo siento, no pude acceder a las instrucciones del sistema. Intenta más tarde."
     except Exception as e:
+        # Handle any other exceptions
         print(f"GPT-4 Error: {e}")
         return f"Lo siento {context.get('name', '')}, ¿podrías reformular tu pregunta?"
 
@@ -175,6 +296,26 @@ async def whatsapp_webhook(
     From: str = Form(...),
     db: Session = Depends(get_db)
 ):
+    """
+    Handles incoming WhatsApp messages via a webhook.
+
+    This function processes incoming messages from WhatsApp, manages user state,
+    and generates appropriate bot responses based on the conversation flow.
+
+    Parameters:
+    - Body (str): The body of the incoming WhatsApp message.
+    - From (str): The sender's WhatsApp number.
+    - db (Session): The database session for accessing and storing conversation data.
+
+    Returns:
+    - dict: A JSON response indicating the success or error status of the message handling.
+
+    The function follows a conversation flow based on user steps such as 'inicio', 'nombre',
+    'rol', etc. It updates the user state, generates responses, and interacts with the
+    OpenAI GPT-4 model for dynamic responses when necessary.
+
+    Exceptions are caught and logged, with database transactions being rolled back on errors.
+    """
     print(f"Solicitud recibida. Body: {Body}, From: {From}")
 
     try:
@@ -208,10 +349,10 @@ async def whatsapp_webhook(
                 user_state["step"] = "rol"
                 update_user_state(sender, user_state)
             elif not is_valid_name(incoming_msg):
-                if "llamo" in incoming_msg.lower() and "nicolas" in incoming_msg.lower():
-                    user_state["name"] = "Nicolas"
+                if "llamo" in incoming_msg.lower() and "paquete" in incoming_msg.lower():
+                    user_state["name"] = "paquete"
                     bot_response = (
-                        f"¡Gracias Nicolas! ¿Eres jugador, personal del club o servicio técnico?\n"
+                        f"¡Gracias paquete! ¿Eres jugador, personal del club o servicio técnico?\n"
                         "1️⃣ Jugador\n"
                         "2️⃣ Staff\n"
                         "3️⃣ Servicio Técnico"
