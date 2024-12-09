@@ -1,7 +1,0 @@
-
-fastapi
-sqlalchemy
-openai
-twilio
-uvicorn
-python-decouple
